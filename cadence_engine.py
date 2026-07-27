@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
-import smtplib
 from datetime import datetime, timedelta, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
 
 STATE_FILE = Path("cadence_state.json")
-ENGINE_API_VERSION = "anthropic-tailoring-v2-strategy-first"
+ENGINE_API_VERSION = "tracker-v3-merge-csv-only"
 
 OPT_OUT_FOOTER = (
     "\n\nIf you would rather not hear from me again, reply with 'no thanks' "
@@ -193,32 +192,104 @@ def mark_finished_if_done(contact: dict[str, Any], cadence: dict[str, Any]) -> N
         contact["status"] = "finished"
 
 
-def smtp_send(
-    host: str,
-    port: str | int,
-    user: str,
-    password: str,
-    to_addr: str,
-    subject: str,
-    body: str,
-    bcc_addr: str = "",
-) -> tuple[bool, str]:
-    """Send a plain-text email. The BCC is envelope-only and is not exposed."""
-    msg = MIMEMultipart()
-    msg["From"] = user
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+# ---------------------------------------------------------------------------
+# Bulk reply flagging
+# ---------------------------------------------------------------------------
+ADDRESS_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
-    recipients = [to_addr] + ([bcc_addr] if bcc_addr else [])
+# Header names Outlook and the usual exports put the sender address under.
+REPLY_EMAIL_HEADERS = (
+    "email",
+    "email address",
+    "from",
+    "from: (address)",
+    "from address",
+    "sender",
+    "sender address",
+    "reply from",
+    "e-mail address",
+)
+
+
+def extract_addresses(text: str) -> list[str]:
+    """Pull every distinct email address out of free text, in order of appearance.
+
+    Deliberately forgiving. Handles bare addresses, "Sarah Jones <s@co.com>",
+    semicolon or comma separated lists, and pasted Outlook rows.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for match in ADDRESS_RE.findall(str(text or "")):
+        address = match.strip().strip(".,;:<>\"'").lower()
+        if address and address not in seen:
+            seen.add(address)
+            ordered.append(address)
+    return ordered
+
+
+def extract_addresses_from_csv(raw: bytes | str) -> list[str]:
+    """Read a CSV export and return sender addresses.
+
+    Prefers a recognised email column. Falls back to scanning the whole file,
+    which covers exports with unusual headers or no header row at all.
+    """
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8-sig", errors="replace")
+    else:
+        text = str(raw or "").lstrip("\ufeff")
+
     try:
-        with smtplib.SMTP(host, int(port), timeout=30) as smtp:
-            smtp.starttls()
-            smtp.login(user, password)
-            smtp.sendmail(user, recipients, msg.as_string())
-        return True, ""
-    except Exception as exc:
-        return False, str(exc)[:200]
+        reader = csv.DictReader(io.StringIO(text))
+        fieldnames = [str(name or "").strip().lower() for name in (reader.fieldnames or [])]
+        target = next(
+            (name for name in fieldnames if name in REPLY_EMAIL_HEADERS),
+            "",
+        )
+        if target:
+            collected: list[str] = []
+            for row in reader:
+                for key, value in row.items():
+                    if str(key or "").strip().lower() == target:
+                        collected.extend(extract_addresses(value))
+            if collected:
+                # Deduplicate while preserving order.
+                seen: set[str] = set()
+                return [a for a in collected if not (a in seen or seen.add(a))]
+    except (csv.Error, UnicodeDecodeError):
+        pass
+
+    return extract_addresses(text)
+
+
+def bulk_mark_replied(
+    state: dict[str, Any],
+    addresses: list[str],
+) -> dict[str, list[str]]:
+    """Flag every supplied address as replied. Matches that person only.
+
+    Returns a report with three lists: flagged, already (already replied,
+    finished or excluded) and not_found. The not_found list matters: a reply
+    from an alias or a colleague will not match and needs handling by hand.
+    """
+    by_email = {
+        str(contact.get("email", "")).strip().lower(): contact
+        for contact in state.get("contacts", [])
+    }
+
+    report: dict[str, list[str]] = {"flagged": [], "already": [], "not_found": []}
+    for address in addresses:
+        key = str(address or "").strip().lower()
+        if not key:
+            continue
+        contact = by_email.get(key)
+        if contact is None:
+            report["not_found"].append(key)
+        elif contact.get("status") != "active":
+            report["already"].append(key)
+        else:
+            mark_replied(contact)
+            report["flagged"].append(key)
+    return report
 
 
 DEFAULT_CADENCE = {
