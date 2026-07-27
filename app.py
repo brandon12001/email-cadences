@@ -31,7 +31,32 @@ for secret_name in (
 
 import cadence_engine as eng
 
+REQUIRED_ENGINE_API = "anthropic-tailoring-v1"
+REQUIRED_ENGINE_FUNCTIONS = (
+    "has_tailored_sequence",
+    "step_for_contact",
+    "tailor_contact_sequence",
+    "cache_tailored_sequence",
+    "normalise_state",
+)
+
 st.set_page_config(page_title="Email Cadences", layout="wide")
+
+missing_engine_functions = [
+    name for name in REQUIRED_ENGINE_FUNCTIONS if not hasattr(eng, name)
+]
+engine_version = getattr(eng, "ENGINE_API_VERSION", "legacy")
+if missing_engine_functions or engine_version != REQUIRED_ENGINE_API:
+    st.error(
+        "Deployment mismatch: app.py and cadence_engine.py are from different "
+        "versions. Replace BOTH files in the GitHub repository with the matched "
+        "hotfix files, then reboot the Streamlit app."
+    )
+    st.code(
+        f"Engine version: {engine_version}\n"
+        f"Missing functions: {', '.join(missing_engine_functions) or 'none'}"
+    )
+    st.stop()
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 SMTP_KEYS = ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS")
