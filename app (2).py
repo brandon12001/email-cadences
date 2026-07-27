@@ -80,6 +80,43 @@ with tab_send:
     due = [c for c in active if eng.contact_due(c, cadence)]
     st.metric("Due to send now", len(due))
 
+    # ---- Word mail-merge workflow ----
+    st.subheader("Daily merge CSV (for Word)")
+    st.caption("Download today's due emails fully written, one row each, run your "
+               "Word mail merge from it, then confirm the batch below so the app "
+               "advances everyone to their next step.")
+    cap_merge = st.number_input("Batch size", 1, 200, 40, key="cap_merge")
+    batch_m = due[: int(cap_merge)]
+    if batch_m:
+        rows = []
+        for c in batch_m:
+            sd = cadence["steps"][c.get("step", 0)]
+            subj, body = eng.build_email(c, sd)
+            rows.append({"email": c["email"], "first_name": eng.first_name(c.get("name","")),
+                         "name": c.get("name",""), "company": c.get("company",""),
+                         "step": c.get("step", 0) + 1, "subject": subj, "body": body})
+        dfm = pd.DataFrame(rows)
+        st.download_button(
+            f"Download merge CSV ({len(rows)} emails)",
+            dfm.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"cadence_merge_{time.strftime('%d-%m-%Y')}.csv",
+            mime="text/csv", type="primary")
+        with st.expander("Preview first 3 rows"):
+            for r in rows[:3]:
+                st.markdown(f"**{r['email']}** — step {r['step']} — {r['subject']}")
+                st.text(r["body"][:400])
+        if st.button(f"I've sent this batch — advance all {len(rows)}"):
+            for c in batch_m:
+                eng.advance(c)
+                eng.mark_finished_if_done(c, cadence)
+                state["log"].append({"t": time.strftime("%d/%m/%Y %H:%M"),
+                                     "who": c["email"], "step": c["step"],
+                                     "subject": "via Word merge"})
+            persist()
+            st.success(f"Advanced {len(rows)} contacts.")
+            st.rerun()
+    st.divider()
+
     daily_cap = st.number_input("Max sends this run", 1, 200, 40)
     gap_secs = st.slider("Seconds between sends", 5, 60, 15)
 
