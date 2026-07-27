@@ -94,7 +94,8 @@ with tab_send:
             subj, body = eng.build_email(c, sd)
             rows.append({"email": c["email"], "first_name": eng.first_name(c.get("name","")),
                          "name": c.get("name",""), "company": c.get("company",""),
-                         "step": c.get("step", 0) + 1, "subject": subj, "body": body})
+                         "step": c.get("step", 0) + 1, "subject": subj,
+                         "body": body.replace("\r\n", "\n").replace("\n", "\\n")})
         dfm = pd.DataFrame(rows)
         st.download_button(
             f"Download merge CSV ({len(rows)} emails)",
