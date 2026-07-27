@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from typing import Any
 
 import pandas as pd
@@ -17,11 +18,6 @@ for secret_name in (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_WEB_SEARCH",
-    "SMTP_HOST",
-    "SMTP_PORT",
-    "SMTP_USER",
-    "SMTP_PASS",
-    "SF_BCC",
 ):
     try:
         if secret_name in st.secrets and st.secrets[secret_name] not in (None, ""):
@@ -31,13 +27,16 @@ for secret_name in (
 
 import cadence_engine as eng
 
-REQUIRED_ENGINE_API = "anthropic-tailoring-v2-strategy-first"
+REQUIRED_ENGINE_API = "tracker-v3-merge-csv-only"
 REQUIRED_ENGINE_FUNCTIONS = (
     "has_tailored_sequence",
     "step_for_contact",
     "tailor_contact_sequence",
     "cache_tailored_sequence",
     "normalise_state",
+    "extract_addresses",
+    "extract_addresses_from_csv",
+    "bulk_mark_replied",
 )
 
 st.set_page_config(page_title="Email Cadences", layout="wide")
@@ -59,7 +58,6 @@ if missing_engine_functions or engine_version != REQUIRED_ENGINE_API:
     st.stop()
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-SMTP_KEYS = ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 ANTHROPIC_READY = bool(os.environ.get("ANTHROPIC_API_KEY"))
 DEFAULT_WEB_SEARCH = os.environ.get("ANTHROPIC_WEB_SEARCH", "true").lower() not in {
@@ -117,27 +115,36 @@ def flash_message() -> None:
     getattr(st, kind, st.info)(text)
 
 
-smtp_values = {key: os.environ.get(key, "") for key in SMTP_KEYS}
-smtp_ready = all(smtp_values.values())
-smtp_partial = any(smtp_values.values()) and not smtp_ready
-sender_mode = "SMTP" if smtp_ready else "Word and Outlook macro"
-salesforce_status = (
-    "SMTP BCC configured"
-    if smtp_ready and os.environ.get("SF_BCC")
-    else "handled by the Word macro"
-)
 claude_status = f"configured ({ANTHROPIC_MODEL})" if ANTHROPIC_READY else "NOT configured"
+status_counts = Counter(
+    str(contact.get("status", "active")) for contact in state["contacts"]
+)
 
 st.title("Email Cadences")
 st.caption(
-    f"Claude: **{claude_status}**  |  Salesforce: **{salesforce_status}**  |  "
-    f"Sender: **{sender_mode}**  |  Contacts: {len(state['contacts'])}"
+    f"Claude: **{claude_status}**  |  Sending: **Word merge CSV, Outlook applies the "
+    f"Salesforce BCC and signature**  |  Active: {status_counts.get('active', 0)}  |  "
+    f"Replied: {status_counts.get('replied', 0)}  |  "
+    f"Finished: {status_counts.get('finished', 0)}  |  "
+    f"Total: {len(state['contacts'])}"
 )
 flash_message()
 
-if smtp_partial:
-    missing = [key for key, value in smtp_values.items() if not value]
-    st.warning(f"SMTP is only partly configured. Missing: {', '.join(missing)}")
+if st.session_state.get("backup_due"):
+    st.error(
+        "**Unsaved progress.** Streamlit Cloud can wipe the state file on redeploy, "
+        "which would lose every contact's position in the sequence. Download the "
+        "backup below, then this warning clears."
+    )
+    if st.download_button(
+        "Download state backup now",
+        data=json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name=f"cadence_state_{time.strftime('%d-%m-%Y_%H%M')}.json",
+        mime="application/json",
+        type="primary",
+        key="backup_banner",
+    ):
+        st.session_state.backup_due = False
 
 if not ANTHROPIC_READY:
     st.warning(
@@ -252,6 +259,7 @@ with tab_send:
             progress.progress((index + 1) / len(tailoring_batch))
 
         persist()
+        st.session_state.backup_due = True
         st.session_state.flash = (
             "success" if failed == 0 else "warning",
             f"Claude tailored {completed}, excluded {excluded}, failed {failed}.",
@@ -329,6 +337,7 @@ with tab_send:
                     }
                 )
             persist()
+            st.session_state.backup_due = True
             st.session_state.flash = ("success", f"Advanced {len(rows)} contacts.")
             st.rerun()
     elif due:
@@ -336,71 +345,85 @@ with tab_send:
     else:
         st.info("No active contacts are due right now.")
 
-    if smtp_ready and tailored_due:
-        st.divider()
-        st.subheader("Optional direct SMTP send")
-        st.caption(
-            "This is separate from the Word macro. It sends the same Claude-tailored copy "
-            "but does not use your formatted Outlook signature."
-        )
-        daily_cap = st.number_input("Max SMTP sends", 1, 200, 40)
-        gap_seconds = st.slider("Seconds between SMTP sends", 5, 60, 15)
-        if st.button("Run SMTP send"):
-            sent = 0
-            failed = 0
-            batch = tailored_due[: int(daily_cap)]
-            progress = st.progress(0.0)
-            log_box = st.container()
-
-            for index, contact in enumerate(batch):
-                step_index = int(contact.get("step", 0) or 0)
-                step_definition = eng.step_for_contact(contact, cadence, step_index)
-                subject, body = eng.build_email(contact, step_definition)
-                ok, error = eng.smtp_send(
-                    smtp_values["SMTP_HOST"],
-                    smtp_values["SMTP_PORT"],
-                    smtp_values["SMTP_USER"],
-                    smtp_values["SMTP_PASS"],
-                    contact["email"],
-                    subject,
-                    body,
-                    os.environ.get("SF_BCC", ""),
-                )
-                if ok:
-                    eng.advance(contact)
-                    eng.mark_finished_if_done(contact, cadence)
-                    sent += 1
-                    log_box.write(f"Sent: {contact_label(contact)}")
-                    if index < len(batch) - 1:
-                        time.sleep(gap_seconds)
-                else:
-                    failed += 1
-                    log_box.write(f"Failed: {contact_label(contact)} | {error}")
-                progress.progress((index + 1) / len(batch))
-
-            persist()
-            st.success(f"Done. Sent {sent}, failed {failed}.")
-
     st.divider()
-    st.subheader("Flag replies before the next batch")
-    stoppable = [
-        contact
-        for contact in state["contacts"]
-        if contact.get("status") == "active" and int(contact.get("step", 0) or 0) > 0
-    ]
-    if stoppable:
-        reply_labels = [f"{contact_label(contact)} <{contact['email']}>" for contact in stoppable]
-        selected_reply = st.selectbox("Contact", reply_labels)
-        if st.button("Mark replied and stop sequence"):
-            selected_email = selected_reply.rsplit("<", 1)[1].rstrip(">")
-            for contact in state["contacts"]:
-                if contact.get("email") == selected_email:
-                    eng.mark_replied(contact)
-                    break
-            persist()
+    st.subheader("Flag replies")
+    st.caption(
+        "Flagging stops that person only. Colleagues at the same company stay in "
+        "their own sequence. Flagged contacts are excluded from every future merge "
+        "CSV, and the record is kept so re-uploading your contact list cannot "
+        "resurrect them."
+    )
+
+    paste_column, upload_column = st.columns(2)
+    pasted = paste_column.text_area(
+        "Paste addresses",
+        height=180,
+        placeholder=(
+            "sarah@company.co.uk\n"
+            "Tom Wright <t.wright@another.com>\n"
+            "one per line, or paste rows straight out of Outlook"
+        ),
+        key="reply_paste",
+    )
+    reply_upload = upload_column.file_uploader(
+        "Or upload a CSV export",
+        type=["csv"],
+        key="reply_csv",
+        help=(
+            "Outlook: File, Open and Export, Import/Export, Comma Separated Values. "
+            "Any column named Email, From, From: (Address) or Sender is read. If none "
+            "is found, every address in the file is used."
+        ),
+    )
+
+    incoming: list[str] = []
+    if pasted.strip():
+        incoming.extend(eng.extract_addresses(pasted))
+    if reply_upload is not None:
+        try:
+            incoming.extend(eng.extract_addresses_from_csv(reply_upload.getvalue()))
+        except Exception as exc:
+            st.error(f"Could not read that CSV: {exc}")
+
+    seen_incoming: set[str] = set()
+    incoming = [a for a in incoming if not (a in seen_incoming or seen_incoming.add(a))]
+
+    if incoming:
+        upload_column.caption(f"{len(incoming)} distinct address(es) found.")
+
+    if st.button(
+        f"Flag {len(incoming)} contact(s) as replied",
+        type="primary",
+        disabled=not incoming,
+    ):
+        report = eng.bulk_mark_replied(state, incoming)
+        persist()
+        st.session_state.backup_due = True
+        st.session_state.reply_report = report
+        st.session_state.flash = (
+            "success" if not report["not_found"] else "warning",
+            f"Flagged {len(report['flagged'])}, "
+            f"{len(report['already'])} already stopped, "
+            f"{len(report['not_found'])} not found.",
+        )
+        st.rerun()
+
+    report = st.session_state.get("reply_report")
+    if report:
+        summary_1, summary_2, summary_3 = st.columns(3)
+        summary_1.metric("Flagged", len(report["flagged"]))
+        summary_2.metric("Already stopped", len(report["already"]))
+        summary_3.metric("Not found", len(report["not_found"]))
+        if report["not_found"]:
+            st.warning(
+                "These did not match anyone in the tracker. Usually an alias, a "
+                "colleague replying on their behalf, or a forwarded thread. Handle "
+                "these by hand."
+            )
+            st.code("\n".join(report["not_found"]))
+        if st.button("Clear this report"):
+            st.session_state.pop("reply_report", None)
             st.rerun()
-    else:
-        st.caption("No previously emailed active contacts are available to flag.")
 
 with tab_contacts:
     st.subheader("Upload contacts")
@@ -497,7 +520,7 @@ with tab_contacts:
         statuses = filter_column.multiselect(
             "Status",
             ["active", "replied", "finished", "excluded"],
-            default=["active", "replied"],
+            default=["active"],
         )
         view = (
             contacts_frame[contacts_frame["status"].isin(statuses)]
@@ -608,12 +631,14 @@ with tab_settings:
     st.divider()
     st.subheader("Sending setup")
     st.markdown(
-        "**Recommended path:** download the tailored merge CSV and run the Word macro. "
-        "The macro applies the Salesforce BCC and preserves your Outlook signature."
+        "This app does not send email. It tracks which step each contact is on and "
+        "exports the daily merge CSV. Sending happens in Word and Outlook, which is "
+        "what applies the Salesforce BCC and your real signature with the regulatory "
+        "footer."
     )
     st.markdown(
-        "**Optional SMTP path:** set SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASS in "
-        "Streamlit secrets. Set SF_BCC as well if Salesforce logging is required."
+        "**Daily loop:** flag any replies, tailor the next due contacts, download the "
+        "merge CSV, run the Word macro, then come back and advance the batch."
     )
 
     st.divider()
@@ -642,5 +667,6 @@ with tab_settings:
         else:
             st.session_state.state = restored
             eng.save_state(restored)
+            st.session_state.backup_due = False
             st.success("Restored.")
             st.rerun()
