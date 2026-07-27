@@ -276,7 +276,6 @@ with tab_settings:
     st.subheader("State backup")
     st.caption("Streamlit free tier can reset storage on redeploys. Download the "
                "state after big changes; upload to restore.")
-    stbytes = io.BytesIO(pd.io.json.dumps(state).encode() if hasattr(pd.io, 'json') else b"")
     st.download_button("Download state (JSON)",
                        data=bytes(__import__('json').dumps(state, indent=2), 'utf-8'),
                        file_name="cadence_state.json", mime="application/json")
