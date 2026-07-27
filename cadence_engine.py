@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 STATE_FILE = Path("cadence_state.json")
-ENGINE_API_VERSION = "anthropic-tailoring-v1"
+ENGINE_API_VERSION = "anthropic-tailoring-v2-strategy-first"
 
 OPT_OUT_FOOTER = (
     "\n\nIf you would rather not hear from me again, reply with 'no thanks' "
@@ -222,39 +222,41 @@ def smtp_send(
 
 
 DEFAULT_CADENCE = {
-    "name": "FX intro - Claude tailored",
+    "name": "FX hedging strategy - Claude tailored",
     "steps": [
         {
             "wait_days": 0,
-            "subject": "Currency planning at {company}",
+            "subject": "FX strategy at {company}",
             "body": (
                 "{first_name},\n\n"
                 "{ammo_line}"
-                "I wanted to contact you because the way {company} operates may create "
-                "currency exposure around overseas purchasing, sales or supplier payments.\n\n"
-                "We help businesses compare what they are doing today and put a clearer "
-                "plan around rates, timing and margin certainty.\n\n"
-                "Worth a ten-minute conversation?"
+                "The key FX question is usually not whether to hedge everything or leave "
+                "everything open. It is deciding how much exposure to cover, when to act "
+                "and how much flexibility the business needs around upcoming requirements.\n\n"
+                "At Lumon, we help finance teams build a hedging approach around forecast "
+                "margins, cash flow and the timing of their purchasing or sales cycle.\n\n"
+                "Would it be useful to pressure-test your current approach?"
             ),
         },
         {
             "wait_days": 3,
-            "subject": "Re: Currency planning at {company}",
+            "subject": "Re: FX strategy at {company}",
             "body": (
                 "{first_name},\n\n"
-                "A quick follow-up in case currency sits elsewhere in the business. "
-                "The useful starting point is normally a comparison against the current "
-                "approach, rather than changing anything for the sake of it.\n\n"
-                "Are you the right person for that at {company}?"
+                "A second angle is flexibility. A strategy can provide certainty without "
+                "forcing the business to cover every requirement in the same way or at the "
+                "same time.\n\n"
+                "Is reviewing coverage, timing and flexibility relevant for {company} this year?"
             ),
         },
         {
             "wait_days": 4,
-            "subject": "Re: Currency planning at {company}",
+            "subject": "Re: FX strategy at {company}",
             "body": (
                 "{first_name},\n\n"
-                "I will leave it here after this. If reviewing currency costs or planning "
-                "becomes relevant, would Tuesday or Thursday suit for a brief comparison?"
+                "I will leave it here after this. If it would be useful to pressure-test how "
+                "your current hedging approach protects upcoming margins while retaining "
+                "flexibility, would Tuesday or Thursday suit for ten minutes?"
             ),
         },
     ],
@@ -369,19 +371,31 @@ RESEARCH AND ACCURACY RULES
 7. Do not disqualify a company for being small.
 8. If the company is clearly in firearms, cannabis, adult services/content or radioactive materials, set skip to true and do not draft emails.
 
+POSITIONING PRIORITY
+1. Lumon is being sold primarily through hedging strategy, not price.
+2. Lead with the strategic problem: how much exposure to cover, when to act, how far forward to plan, and how to balance margin certainty with flexibility.
+3. Focus on forecast margins, cash-flow visibility, budget rates, coverage decisions, timing, tenor, layering and governance where relevant and supported.
+4. Do not lead with spreads, cheaper rates, savings, transaction benchmarking or comparing one recent trade.
+5. Price may only appear as a secondary consideration after the strategic value is clear.
+6. Do not imply that hedging means covering everything or using forwards only. Keep the language product-neutral and acknowledge that a good strategy may combine certainty and flexibility.
+7. For sophisticated hedgers, use language such as reviewing or pressure-testing the current approach. Never suggest they have simply "missed upside".
+
 WRITING RULES
 1. Write in Brandon's direct, simple British sales style.
 2. Use "Lumon", never "Lumon Pay".
 3. No em dashes. No hype. No fake familiarity. No generic compliments.
 4. Each email must contain a real company-specific reason for contact where research supports one.
-5. For finance leaders, focus on control, comparison and margin certainty. For MDs/CEOs, focus on commercial predictability and operational impact.
-6. Do not frame forwards as the only answer. Keep the language strategy-led and product-neutral.
-7. Email 1: 65 to 105 words. Establish relevance and ask for a ten-minute conversation.
-8. Email 2: 45 to 80 words. Use a fresh angle, not a generic "just following up" message.
-9. Email 3: 30 to 65 words. Close the loop and use a firm named-day question such as Tuesday or Thursday.
-10. Start every body with the recipient's first name followed by a comma.
-11. Do not include an opt-out line, "Best,", Brandon's name, Lumon signature text or regulatory footer. The app adds those later.
-12. Keep subjects natural and under 65 characters. Follow-up subjects may use "Re:".
+5. Connect that verified fact to a plausible strategic FX consideration without presenting the inference as confirmed fact.
+6. For finance leaders, focus on control, forecast visibility, margin certainty and policy. For MDs/CEOs, focus on commercial predictability and operational impact.
+7. Email 1: 65 to 110 words. Establish company-specific relevance, raise one strategic hedging question and ask for a ten-minute conversation.
+8. Email 2: 45 to 85 words. Use a fresh strategic angle such as coverage, timing, budget rates or flexibility. Do not write a generic "just following up" message.
+9. Email 3: 30 to 70 words. Close the loop and use a firm named-day question such as Tuesday or Thursday.
+10. Preferred calls to action include "Would it be useful to pressure-test your current approach?" and "Worth ten minutes to compare your current approach against the options available?"
+11. Start every body with the recipient's first name followed by a comma.
+12. Do not include an opt-out line, "Best,", Brandon's name, Lumon signature text or regulatory footer. The app adds those later.
+13. Keep subjects natural and under 65 characters. Follow-up subjects may use "Re:".
+14. Never output unresolved placeholders such as {{first_name}}, {{company}} or {{ammo_line}}.
+15. Avoid dead phrases such as "the way your company operates may create currency exposure" and "overseas purchasing, sales or supplier payments".
 
 Return JSON only in exactly this shape:
 {{
@@ -419,6 +433,7 @@ def _call_anthropic(
         "temperature": 0.2,
         "system": (
             "You write accurate, restrained UK B2B foreign-exchange sales emails. "
+            "Sell Lumon through hedging strategy, margin certainty and flexibility, not price. "
             "You must follow the requested JSON format and never invent company facts."
         ),
         "messages": messages,
@@ -514,6 +529,39 @@ def tailor_contact_sequence(
         if recipient_first_name and not body.lower().startswith(recipient_first_name.lower() + ","):
             body = f"{recipient_first_name},\n\n{body}"
         cleaned_steps.append({"subject": subject, "body": body})
+
+    combined_copy = "\n".join(step["body"].lower() for step in cleaned_steps)
+    dead_markers = (
+        "may create currency exposure around overseas purchasing",
+        "overseas purchasing, sales or supplier payments",
+        "compare one recent transaction",
+        "benchmark your current fx costs",
+        "compare what you are doing today",
+        "better fx rate",
+        "cheaper rate",
+        "save money on fx",
+    )
+    matched_marker = next((marker for marker in dead_markers if marker in combined_copy), "")
+    if matched_marker:
+        return None, f"Claude produced generic or price-led copy: {matched_marker}"
+
+    strategic_terms = (
+        "hedg",
+        "exposure",
+        "margin",
+        "cash flow",
+        "budget rate",
+        "coverage",
+        "cover",
+        "timing",
+        "flexibility",
+        "forecast",
+        "risk",
+        "strategy",
+    )
+    strategic_hits = sum(1 for term in strategic_terms if term in combined_copy)
+    if strategic_hits < 2:
+        return None, "Claude copy was not sufficiently strategy-led"
 
     return {
         "skip": False,
