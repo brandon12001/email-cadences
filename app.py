@@ -31,7 +31,7 @@ for secret_name in (
 
 import cadence_engine as eng
 
-REQUIRED_ENGINE_API = "anthropic-tailoring-v1"
+REQUIRED_ENGINE_API = "anthropic-tailoring-v2-strategy-first"
 REQUIRED_ENGINE_FUNCTIONS = (
     "has_tailored_sequence",
     "step_for_contact",
@@ -530,8 +530,9 @@ with tab_contacts:
 with tab_cadence:
     st.subheader("Base strategy")
     st.caption(
-        "These templates provide strategic direction to Claude. Claude rewrites all three "
-        "steps for each contact. Wait days still control when each cached step becomes due."
+        "These are strategy briefs, not the final emails. Claude rewrites all three steps for "
+        "each company and is instructed to sell hedging strategy, margin certainty and "
+        "flexibility rather than price. Wait days control when each cached step is due."
     )
     cadence = state["cadences"]["default"]
     for index, step in enumerate(cadence["steps"]):
